@@ -11,18 +11,40 @@ Requires OpenCode 2.x.
 
 ## Install
 
+Install it straight from GitHub:
+
+```sh
+opencode plugin add github:daniellockyer/opencode-cursor
+```
+
+This installs the plugin and its dependencies and adds it to your global OpenCode config. To pin a version, add a tag,
+branch or commit: `github:daniellockyer/opencode-cursor#<ref>`. `opencode plugin update` picks up new commits on an
+unpinned install.
+
+To enable it for one project only, add the same entry to that project's `.opencode/opencode.jsonc` instead:
+
+```jsonc
+{
+  "plugins": ["github:daniellockyer/opencode-cursor"]
+}
+```
+
+### From a local checkout
+
+For development, clone the repository and point OpenCode at the folder:
+
 ```sh
 git clone https://github.com/daniellockyer/opencode-cursor ~/code/opencode-cursor
 cd ~/code/opencode-cursor && bun install
 ```
-
-Add it to `~/.config/opencode/opencode.jsonc` (or a project's `.opencode/opencode.jsonc`):
 
 ```jsonc
 {
   "plugins": ["/absolute/path/to/opencode-cursor"]
 }
 ```
+
+OpenCode reloads the plugin when its files change.
 
 ## Log in
 
