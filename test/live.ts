@@ -11,7 +11,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { KIND_HEADER, SESSION_HEADER } from "../src/constants.ts"
 import { CursorLanguageModel } from "../src/model.ts"
-import { parse } from "../src/options.ts"
 import { Sessions } from "../src/sessions.ts"
 
 const dir = mkdtempSync(join(tmpdir(), "cursor-live-"))
@@ -23,7 +22,7 @@ const storage = {
   get: async (key: string) => memory.get(key),
   set: async (key: string, value: never) => void memory.set(key, value),
 }
-const sessions = () => new Sessions({ directory: dir, options: parse({}), storage, authFailed: () => console.log("AUTH FAILED") })
+const sessions = () => new Sessions({ directory: dir, storage, authFailed: () => console.log("AUTH FAILED") })
 
 const tools: LanguageModelV3FunctionTool[] = [
   {

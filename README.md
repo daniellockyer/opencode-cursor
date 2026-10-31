@@ -56,28 +56,8 @@ while the agent loop runs on your machine.
 - **Instructions.** Cursor keeps its own harness prompt. The plugin adds OpenCode's agent role and instructions
   (AGENTS.md, skills, references) to the conversation and resends them when they change.
 - Titles, summaries and compaction run as one-off agents with no tools.
-
-## Options
-
-```jsonc
-{
-  "plugins": [
-    {
-      "package": "/absolute/path/to/opencode-cursor",
-      "options": {
-        // "opencode" replaces Cursor's harness prompt with OpenCode's full system prompt.
-        // Cursor has to enable this for your account.
-        "systemPrompt": "cursor",
-        // Cursor settings layers to load: "project", "user", "team", "mdm", "plugins" or "all".
-        // Off by default, so OpenCode's own rules and MCP servers are the only ones in play.
-        "settingSources": [],
-        // Minutes before an idle Cursor agent handle is released. The conversation stays on disk.
-        "idleMinutes": 10,
-      },
-    },
-  ],
-}
-```
+- When a session finishes, the live agent handle is released. The conversation stays on disk and the next message
+  resumes it.
 
 ## Limitations
 

@@ -5,7 +5,7 @@ import type {
   LanguageModelV3Prompt,
   LanguageModelV3ToolResultOutput,
 } from "@ai-sdk/provider"
-import type { SDKCustomToolContent, SDKCustomToolResult, SDKImage, SDKUserMessage } from "@cursor/sdk"
+import type { SDKCustomToolContent, SDKImage, SDKUserMessage } from "@cursor/sdk"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Fingerprints: which part of OpenCode's history the Cursor agent has already seen.
@@ -258,7 +258,12 @@ function resultText(output: LanguageModelV3ToolResultOutput): string {
   }
 }
 
-function toolResult(output: LanguageModelV3ToolResultOutput, media: LanguageModelV3FilePart[]): SDKCustomToolResult {
+export interface ToolEnvelope {
+  content: SDKCustomToolContent[]
+  isError?: boolean
+}
+
+function toolResult(output: LanguageModelV3ToolResultOutput, media: LanguageModelV3FilePart[]): ToolEnvelope {
   const content: SDKCustomToolContent[] = []
   const isError = output.type === "error-text" || output.type === "error-json" || output.type === "execution-denied"
   if (output.type === "content") {
@@ -280,7 +285,7 @@ function toolResult(output: LanguageModelV3ToolResultOutput, media: LanguageMode
 }
 
 export interface Continuation {
-  readonly results: Map<string, SDKCustomToolResult>
+  readonly results: Map<string, ToolEnvelope>
   /** User input OpenCode delivered while the tools ran. */
   readonly steer?: string
 }
@@ -288,7 +293,7 @@ export interface Continuation {
 /** Results for every waiting tool call, or undefined when any is missing. */
 export function continuation(prompt: LanguageModelV3Prompt, waiting: readonly string[]): Continuation | undefined {
   const wanted = new Set(waiting)
-  const results = new Map<string, SDKCustomToolResult>()
+  const results = new Map<string, ToolEnvelope>()
   let last = -1
   for (let i = 0; i < prompt.length; i++) {
     const message = prompt[i]!
@@ -308,13 +313,15 @@ export function continuation(prompt: LanguageModelV3Prompt, waiting: readonly st
   return { results, ...(steer ? { steer } : {}) }
 }
 
-export function appendSteer(result: SDKCustomToolResult, steer: string): SDKCustomToolResult {
-  const note: SDKCustomToolContent = {
-    type: "text",
-    text: `<user-message>\nThe user sent this message while the tool ran. Take it into account before continuing:\n${steer}\n</user-message>`,
+export function appendSteer(result: ToolEnvelope, steer: string): ToolEnvelope {
+  return {
+    ...result,
+    content: [
+      ...result.content,
+      {
+        type: "text",
+        text: `<user-message>\nThe user sent this message while the tool ran. Take it into account before continuing:\n${steer}\n</user-message>`,
+      },
+    ],
   }
-  if (typeof result === "object" && result !== null && "content" in result && Array.isArray(result.content)) {
-    return { ...result, content: [...result.content, note] }
-  }
-  return { content: [{ type: "text", text: typeof result === "string" ? result : JSON.stringify(result) }, note] }
 }

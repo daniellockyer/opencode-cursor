@@ -67,7 +67,7 @@ export async function apiKey(ctx: Plugin.Context) {
   const connection = await ctx.integration.connection.active(PROVIDER_ID)
   if (!connection) return undefined
   const credential = await ctx.integration.connection.resolve(connection)
-  if (credential?.type === "key") return { connection, key: credential.key }
-  if (credential?.type === "oauth") return { connection, key: credential.access }
+  if (credential?.type === "key") return credential.key
+  if (credential?.type === "oauth") return credential.access
   return undefined
 }

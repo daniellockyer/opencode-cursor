@@ -3,17 +3,7 @@ import { Agent, type AgentOptions, type ModelSelection, type SDKAgent } from "@c
 import { createHash } from "node:crypto"
 import { continuation, history, standaloneMessage, toCursor, unseen, unseenMessage } from "./convert.ts"
 import { isAuthError } from "./errors.ts"
-import type { Options } from "./options.ts"
 import { Step, Turn } from "./turn.ts"
-
-export interface Context {
-  /** The selected OpenCode agent's own prompt. */
-  readonly agent?: string
-  /** OpenCode's instructions (AGENTS.md, skills, references…) without its base prompt. */
-  readonly instructions?: string
-  /** OpenCode's complete system prompt. */
-  readonly system?: string
-}
 
 export interface Request {
   /** Only the agent loop has one; titles, summaries and other side calls run as standalone agents. */
@@ -22,7 +12,8 @@ export interface Request {
   readonly apiKey?: string
   readonly prompt: LanguageModelV3Prompt
   readonly tools: readonly LanguageModelV3FunctionTool[]
-  readonly context: Context
+  /** OpenCode's role and instructions. Sent with the first message and again when they change. */
+  readonly preamble?: string
   readonly step: Step
 }
 
@@ -30,19 +21,18 @@ interface Record {
   readonly agentId: string
   /** Fingerprints of the OpenCode history the agent has seen. */
   readonly history: readonly string[]
-  /** Fingerprint of the OpenCode instructions the agent was given. */
+  /** Fingerprint of the preamble the agent was given. */
   readonly instructions?: string
 }
 
 interface Entry {
   queue: Promise<void>
   agent?: SDKAgent
-  /** The settings the live handle was opened with. */
-  handle?: string
+  /** The API key the live handle was opened with. */
+  apiKey?: string
   record?: Record
   loaded: boolean
   turn?: Turn
-  idle?: ReturnType<typeof setTimeout>
 }
 
 interface Storage {
@@ -50,19 +40,12 @@ interface Storage {
   set(key: string, value: never): Promise<void>
 }
 
-const RUNTIME = [
-  "You are running inside OpenCode, connected through the Cursor SDK.",
-  "Cursor's built-in tools are turned off. OpenCode's tools are available through the `custom-user-tools` MCP server: use them for all file, search, shell and other work.",
-  "OpenCode shows tool calls to the user and asks for permission when needed. Mention this setup only if asked.",
-].join(" ")
-
 export class Sessions {
   private readonly entries = new Map<string, Entry>()
 
   constructor(
     private readonly deps: {
       readonly directory: string
-      readonly options: Options
       readonly storage: Storage
       readonly authFailed: () => void
     },
@@ -73,7 +56,6 @@ export class Sessions {
     const sessionID = request.sessionID
     const entry = this.entry(sessionID)
     return this.lock(entry, async () => {
-      clearTimeout(entry.idle)
       if (!entry.loaded) {
         entry.record = await this.load(sessionID)
         entry.loaded = true
@@ -96,30 +78,33 @@ export class Sessions {
     })
   }
 
-  /** OpenCode stopped the session, so a run waiting for tool results will not get them. */
-  async interrupt(sessionID: string) {
+  /**
+   * The session stopped. A run still waiting for tool results is cancelled, which drops the Cursor agent. Otherwise
+   * the live handle is released; the conversation stays on disk and the next message resumes it.
+   */
+  async settle(sessionID: string) {
     const entry = this.entries.get(sessionID)
-    const turn = entry?.turn
-    if (!entry || !turn || turn.finished || turn.attached) return
-    await this.cancel(sessionID, entry, turn)
+    if (!entry) return
+    const turn = entry.turn
+    if (turn && !turn.finished) {
+      if (!turn.attached) await this.cancel(sessionID, entry, turn)
+      return
+    }
+    entry.agent?.close()
+    entry.agent = undefined
   }
 
   async close() {
     for (const [sessionID, entry] of this.entries) {
-      clearTimeout(entry.idle)
       if (entry.turn && !entry.turn.finished) await this.cancel(sessionID, entry, entry.turn).catch(() => {})
-      clearTimeout(entry.idle)
       entry.agent?.close()
     }
     this.entries.clear()
   }
 
   private async start(sessionID: string, entry: Entry, request: Request) {
-    const { options } = this.deps
-    const context = resolveContext(request)
-    const preamble = options.systemPrompt === "cursor" ? cursorPreamble(context) : undefined
-    const system = options.systemPrompt === "opencode" ? [context.system, RUNTIME].filter(Boolean).join("\n\n") : undefined
-    const instructions = fingerprint(preamble ?? system ?? "")
+    const preamble = request.preamble
+    const instructions = fingerprint(preamble ?? "")
 
     let start = entry.record ? unseen(request.prompt, entry.record.history) : undefined
     if (start === undefined) await this.forget(sessionID, entry)
@@ -130,15 +115,10 @@ export class Sessions {
       name: `OpenCode ${sessionID}`,
       // Only MCP tools: OpenCode's tools arrive as custom tools, which Cursor serves through MCP.
       tools: ["mcp"],
-      local: {
-        cwd: this.deps.directory,
-        ...(options.settingSources.length > 0 ? { settingSources: options.settingSources } : {}),
-      },
-      ...(system ? { systemPrompt: system } : {}),
+      local: { cwd: this.deps.directory },
     }
-    // The API key and system prompt are fixed when a handle opens, so a change reopens the same conversation.
-    const handle = fingerprint(JSON.stringify([request.apiKey, system]))
-    if (entry.agent && entry.handle !== handle) {
+    // The API key is fixed when a handle opens, so a change reopens the same conversation.
+    if (entry.agent && entry.apiKey !== request.apiKey) {
       entry.agent.close()
       entry.agent = undefined
     }
@@ -155,7 +135,7 @@ export class Sessions {
       return request.step.fail(error)
     }
     entry.agent = agent
-    entry.handle = handle
+    entry.apiKey = request.apiKey
 
     const intro = start === 0 || entry.record?.instructions !== instructions ? preamble : undefined
     const message = unseenMessage(request.prompt, start ?? 0, intro)
@@ -167,7 +147,6 @@ export class Sessions {
 
     const agentId = agent.agentId
     turn.agentId = agentId
-    turn.instructions = instructions
     try {
       turn.run = await agent.send(toCursor(message), {
         model: request.model,
@@ -180,25 +159,30 @@ export class Sessions {
       entry.turn = undefined
       return
     }
-    turn.run.wait().then(
-      (result) => {
-        if (turn.finished) return
-        // Record what Cursor saw before OpenCode can see the finish and send its next request.
-        this.remember(sessionID, entry, { agentId, history: history(turn.prompt), instructions })
-        if (entry.turn === turn) entry.turn = undefined
-        turn.finish(result)
-        this.armIdle(entry)
-      },
+    void turn.run.wait().then(
+      (result) => this.complete(sessionID, entry, turn, agentId, instructions, result),
       (error) => {
-        if (turn.finished) return
         if (isAuthError(error)) this.deps.authFailed()
-        this.remember(sessionID, entry, { agentId, history: history(turn.prompt), instructions })
-        if (entry.turn === turn) entry.turn = undefined
-        turn.fail(error)
-        this.armIdle(entry)
+        this.complete(sessionID, entry, turn, agentId, instructions, error)
       },
     )
     await request.step.done
+  }
+
+  private complete(
+    sessionID: string,
+    entry: Entry,
+    turn: Turn,
+    agentId: string,
+    instructions: string,
+    outcome: Awaited<ReturnType<NonNullable<Turn["run"]>["wait"]>> | unknown,
+  ) {
+    if (turn.finished) return
+    // Record what Cursor saw before OpenCode can see the finish and send its next request.
+    this.remember(sessionID, entry, { agentId, history: history(turn.prompt), instructions })
+    if (entry.turn === turn) entry.turn = undefined
+    if (isRunResult(outcome)) turn.finish(outcome)
+    else turn.fail(outcome)
   }
 
   private async standalone(request: Request) {
@@ -254,7 +238,7 @@ export class Sessions {
     const previous = entry.record
     const agent = entry.agent
     entry.agent = undefined
-    entry.handle = undefined
+    entry.apiKey = undefined
     entry.record = undefined
     const cleared = this.deps.storage.set(key(sessionID), null as never).catch(() => {})
     await before
@@ -278,17 +262,6 @@ export class Sessions {
     }
   }
 
-  // The conversation stays in Cursor's local store; only the live handle is released.
-  private armIdle(entry: Entry) {
-    clearTimeout(entry.idle)
-    entry.idle = setTimeout(() => {
-      if (entry.turn && !entry.turn.finished) return
-      entry.agent?.close()
-      entry.agent = undefined
-    }, this.deps.options.idleMinutes * 60_000)
-    entry.idle.unref?.()
-  }
-
   private entry(sessionID: string) {
     let entry = this.entries.get(sessionID)
     if (!entry) {
@@ -305,27 +278,19 @@ export class Sessions {
   }
 }
 
+function isRunResult(value: unknown): value is Awaited<ReturnType<NonNullable<Turn["run"]>["wait"]>> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "status" in value &&
+    (value.status === "finished" || value.status === "error" || value.status === "cancelled")
+  )
+}
+
 function key(sessionID: string) {
   return `sessions/${sessionID}`
 }
 
 function fingerprint(value: string) {
   return createHash("sha256").update(value).digest("hex").slice(0, 32)
-}
-
-function resolveContext(request: Request): Context {
-  if (request.context.system !== undefined || request.context.instructions !== undefined) return request.context
-  // Without the session hooks, fall back to the system messages OpenCode put in the prompt.
-  const system = request.prompt
-    .filter((message) => message.role === "system")
-    .map((message) => message.content)
-    .join("\n\n")
-  return { ...request.context, system, instructions: system }
-}
-
-function cursorPreamble(context: Context) {
-  const blocks = [`<runtime>\n${RUNTIME}\n</runtime>`]
-  if (context.agent) blocks.push(`<agent-role>\n${context.agent}\n</agent-role>`)
-  if (context.instructions) blocks.push(`<instructions>\n${context.instructions}\n</instructions>`)
-  return `<opencode-context>\n${blocks.join("\n\n")}\n</opencode-context>`
 }

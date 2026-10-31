@@ -1,29 +1,24 @@
 import { Plugin } from "@opencode/plugin"
 import * as Auth from "./auth.ts"
 import * as Catalog from "./catalog.ts"
-import {
-  AGENT_OPTION,
-  INSTRUCTIONS_OPTION,
-  KIND_HEADER,
-  PACKAGE,
-  PLUGIN_ID,
-  PROVIDER_ID,
-  SYSTEM_OPTION,
-} from "./constants.ts"
+import { KIND_HEADER, PACKAGE, PLUGIN_ID, PREAMBLE_OPTION, PROVIDER_ID } from "./constants.ts"
 import { CursorLanguageModel, parseParams } from "./model.ts"
-import * as Options from "./options.ts"
 import { Sessions } from "./sessions.ts"
 
 // Cursor writes its own date and environment details, so OpenCode's would repeat them.
 const SUPPLIED_BY_CURSOR = new Set(["core/date", "core/environment"])
 
+const RUNTIME = [
+  "You are running inside OpenCode, connected through the Cursor SDK.",
+  "Cursor's built-in tools are turned off. OpenCode's tools are available through the `custom-user-tools` MCP server: use them for all file, search, shell and other work.",
+  "OpenCode shows tool calls to the user and asks for permission when needed. Mention this setup only if asked.",
+].join(" ")
+
 export default Plugin.define({
   id: PLUGIN_ID,
   async setup(ctx) {
-    const options = Options.parse(ctx.options)
     const sessions = new Sessions({
       directory: ctx.location.directory,
-      options,
       storage: ctx.storage,
       authFailed: () => void markNeedsAuth(ctx),
     })
@@ -57,20 +52,14 @@ export default Plugin.define({
       { providerID: PROVIDER_ID },
     )
 
-    for (const kind of ["context", "generate", "compaction"] as const) {
-      await ctx.session.hook(
-        kind,
-        async (event) => {
-          const agent = await ctx.agent.get({ agentID: event.agent }).catch(() => undefined)
-          event.options[AGENT_OPTION] = agent?.data.system ?? ""
-          event.options[INSTRUCTIONS_OPTION] = instructions(event.system)
-          event.options[SYSTEM_OPTION] = event.system.map((part) => part.text).join("\n\n")
-          // Cursor picks its own output budget.
-          delete event.options.maxTokens
-        },
-        { providerID: PROVIDER_ID },
-      )
-    }
+    await ctx.session.hook(
+      "context",
+      async (event) => {
+        const agent = await ctx.agent.get({ agentID: event.agent }).catch(() => undefined)
+        event.options[PREAMBLE_OPTION] = preamble(agent?.data.system ?? "", instructions(event.system))
+      },
+      { providerID: PROVIDER_ID },
+    )
 
     // The Cursor SDK retries transient failures itself; replaying a whole turn could run tools twice.
     await ctx.session.hook(
@@ -87,7 +76,7 @@ export default Plugin.define({
         types: ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"],
         signal: controller.signal,
       })) {
-        await sessions.interrupt(event.data.sessionID).catch(() => {})
+        await sessions.settle(event.data.sessionID).catch(() => {})
       }
     })().catch(() => {})
 
@@ -98,6 +87,13 @@ export default Plugin.define({
     }
   },
 })
+
+function preamble(agent: string, loaded: string) {
+  const blocks = [`<runtime>\n${RUNTIME}\n</runtime>`]
+  if (agent) blocks.push(`<agent-role>\n${agent}\n</agent-role>`)
+  if (loaded) blocks.push(`<instructions>\n${loaded}\n</instructions>`)
+  return `<opencode-context>\n${blocks.join("\n\n")}\n</opencode-context>`
+}
 
 // The first part is OpenCode's own base prompt, which Cursor's harness prompt replaces.
 function instructions(system: ReadonlyArray<{ text: string; metadata?: unknown }>) {

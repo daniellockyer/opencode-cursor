@@ -9,7 +9,5 @@ export const ENV_KEY = "CURSOR_API_KEY"
 export const KIND_HEADER = "x-opencode-cursor-kind"
 export const SESSION_HEADER = "x-opencode-session-id"
 
-// Request options set by the session hooks; OpenCode forwards them as provider options under PROVIDER_ID.
-export const AGENT_OPTION = "cursorAgentPrompt"
-export const INSTRUCTIONS_OPTION = "cursorInstructions"
-export const SYSTEM_OPTION = "cursorSystem"
+/** OpenCode's role and instructions for this turn. The session hook sets it; Cursor's own prompt stays in place. */
+export const PREAMBLE_OPTION = "cursorPreamble"

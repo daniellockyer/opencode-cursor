@@ -49,9 +49,9 @@ export async function register(ctx: Plugin.Context) {
   let refreshing: Promise<void> | undefined
   const refresh = () => {
     refreshing ??= (async () => {
-      const auth = await apiKey(ctx)
-      if (!auth) return
-      const models = await Cursor.models.list({ apiKey: auth.key })
+      const key = await apiKey(ctx)
+      if (!key) return
+      const models = await Cursor.models.list({ apiKey: key })
       const next: Catalog = { models: models.map(normalize) }
       if (JSON.stringify(next) === JSON.stringify(current.catalog)) return
       current.catalog = next

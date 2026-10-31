@@ -140,9 +140,9 @@ export class Turn {
   resume(input: Continuation) {
     const last = this.waiting.at(-1)
     for (const id of this.waiting) {
-      let result = input.results.get(id) as SDKCustomToolResult
-      if (id === last && input.steer) result = appendSteer(result, input.steer)
-      this.handlers.get(id)?.(result)
+      const found = input.results.get(id)
+      if (!found) continue
+      this.handlers.get(id)?.(id === last && input.steer ? appendSteer(found, input.steer) : found)
       this.handlers.delete(id)
     }
     this.waiting = []
